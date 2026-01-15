@@ -1,0 +1,241 @@
+#!/bin/bash
+# ============================================================================
+# GLM_quota_kicker - 调度管理模块
+# ============================================================================
+# 功能：创建和管理系统调度任务（cron/launchd）
+# ============================================================================
+
+# 防止重复加载
+[[ -n "${_LIB_SCHEDULER_LOADED:-}" ]] && return 0
+_LIB_SCHEDULER_LOADED=true
+
+# 加载依赖模块
+source "$(dirname "${BASH_SOURCE[0]}")/config.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/logger.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/deps.sh"
+
+# ============================================================================
+# 生成 macOS launchd 配置
+# ============================================================================
+# 参数:
+#   $1 - 时间数组名称 (包含多个 HH:MM 格式的时间)
+# ----------------------------------------------------------------------------
+scheduler_generate_macos_launchd() {
+    local times_name="$1"
+    eval "local -a times=(\"\${$times_name[@]}\")"
+
+    local plist_path="$HOME/Library/LaunchAgents/com.GLM_quota_kicker.plist"
+    local script_path="$CONFIG_DIR/bin/wake"
+
+    # 创建 plist 文件
+    cat > "$plist_path" << EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.GLM_quota_kicker</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>$script_path</string>
+    </array>
+    <key>StartCalendarInterval</key>
+    <array>
+EOF
+
+    # 添加每个调度时间
+    for time in "${times[@]}"; do
+        local hour="${time%%:*}"
+        local minute="${time##*:}"
+        cat >> "$plist_path" << EOF
+    <dict>
+        <key>Hour</key>
+        <integer>$hour</integer>
+        <key>Minute</key>
+        <integer>$minute</integer>
+    </dict>
+EOF
+    done
+
+    # 结束 plist 文件
+    cat >> "$plist_path" << EOF
+    </array>
+    <key>StandardOutPath</key>
+    <string>$LOG_FILE</string>
+    <key>StandardErrorPath</key>
+    <string>$LOG_FILE</string>
+</dict>
+</plist>
+EOF
+
+    # 加载 launchd
+    launchctl unload "$plist_path" 2>/dev/null || true
+    launchctl load "$plist_path"
+
+    log_info "macOS 调度任务已配置"
+}
+
+# ============================================================================
+# 生成 Linux cron 配置
+# ============================================================================
+# 参数:
+#   $1 - 时间数组名称 (包含多个 HH:MM 格式的时间)
+# ----------------------------------------------------------------------------
+scheduler_generate_linux_cron() {
+    local times_name="$1"
+    eval "local -a times=(\"\${$times_name[@]}\")"
+
+    local script_path="$CONFIG_DIR/bin/wake"
+    local cron_entry=""
+
+    # 构建 cron 条目
+    for time in "${times[@]}"; do
+        local hour="${time%%:*}"
+        local minute="${time##*:}"
+        cron_entry="$cron_entry$minute $hour * * * $script_path\n"
+    done
+
+    # 添加到 crontab
+    (crontab -l 2>/dev/null | grep -v "GLM_quota_kicker"; echo -e "$cron_entry") | crontab -
+
+    log_info "Linux cron 任务已配置"
+}
+
+# ============================================================================
+# 创建调度任务
+# ============================================================================
+# 参数:
+#   $@ - 多个时间 (格式: HH:MM)
+# ----------------------------------------------------------------------------
+scheduler_create() {
+    local -a times=("$@")
+
+    if [[ ${#times[@]} -eq 0 ]]; then
+        log_error "至少需要提供一个时间"
+        return 1
+    fi
+
+    log_info "正在配置系统调度任务..."
+
+    local os_type
+    os_type="$(dep_detect_os)"
+
+    # 根据操作系统类型调用相应的配置函数
+    if [[ "$os_type" == "macos" ]]; then
+        scheduler_generate_macos_launchd times
+    elif [[ "$os_type" == "linux" ]]; then
+        scheduler_generate_linux_cron times
+    else
+        log_error "不支持的操作系统: $os_type"
+        return 1
+    fi
+
+    # 保存调度时间到文件
+    echo "${times[*]}" > "$SCHEDULE_FILE"
+}
+
+# ============================================================================
+# 取消调度任务
+# ============================================================================
+scheduler_remove() {
+    log_info "正在取消调度任务..."
+
+    local os_type
+    os_type="$(dep_detect_os)"
+
+    if [[ "$os_type" == "macos" ]]; then
+        local plist_path="$HOME/Library/LaunchAgents/com.GLM_quota_kicker.plist"
+        launchctl unload "$plist_path" 2>/dev/null || true
+        rm -f "$plist_path"
+        log_info "macOS 调度任务已取消"
+    elif [[ "$os_type" == "linux" ]]; then
+        crontab -l | grep -v "GLM_quota_kicker" | crontab -
+        log_info "Linux cron 任务已取消"
+    fi
+
+    rm -f "$SCHEDULE_FILE"
+}
+
+# ============================================================================
+# 列出当前调度任务
+# ============================================================================
+scheduler_list() {
+    local os_type
+    os_type="$(dep_detect_os)"
+
+    echo "当前调度任务:"
+    echo
+
+    if [[ "$os_type" == "macos" ]]; then
+        if launchctl list | grep -q "GLM_quota_kicker"; then
+            echo "macOS LaunchAgent 任务:"
+            launchctl list | grep "GLM_quota_kicker"
+        else
+            echo "未配置调度任务"
+        fi
+    elif [[ "$os_type" == "linux" ]]; then
+        local cron_jobs
+        cron_jobs=$(crontab -l 2>/dev/null | grep "GLM_quota_kicker" || true)
+        if [[ -n "$cron_jobs" ]]; then
+            echo "Cron 任务:"
+            echo "$cron_jobs"
+        else
+            echo "未配置调度任务"
+        fi
+    fi
+
+    # 显示配置的时间
+    if [[ -f "$SCHEDULE_FILE" ]]; then
+        echo
+        echo "配置的时间: $(cat "$SCHEDULE_FILE")"
+    fi
+}
+
+# ============================================================================
+# 创建一次性重试任务（用于 1308 错误后）
+# ============================================================================
+# 参数:
+#   $1 - 重置时间 (格式: YYYY-MM-DD HH:MM:SS)
+# ----------------------------------------------------------------------------
+scheduler_create_retry_task() {
+    local reset_time="$1"
+    local os_type
+    os_type="$(dep_detect_os)"
+
+    # 计算等待秒数
+    local reset_epoch now_epoch wait_seconds
+    if [[ "$os_type" == "macos" ]]; then
+        reset_epoch=$(date -j -f "%Y-%m-%d %H:%M:%S" "$reset_time" +%s 2>/dev/null)
+    else
+        reset_epoch=$(date -d "$reset_time" +%s 2>/dev/null)
+    fi
+
+    now_epoch=$(date +%s)
+    wait_seconds=$((reset_epoch - now_epoch + 1))
+
+    if [[ $wait_seconds -gt 0 ]]; then
+        local wait_str
+        wait_str=$(utils_format_seconds "$wait_seconds")
+
+        echo -e "${YELLOW}→ 配额将在 $reset_time 重置${NC}"
+        echo -e "${CYAN}→ 已安排自动重试，将在 ${wait_str} 后执行${NC}"
+
+        # 创建一次性调度脚本
+        local temp_script="$CONFIG_DIR/.retry_wake.sh"
+        cat > "$temp_script" << EOF
+#!/bin/bash
+echo "[\$(date '+%Y-%m-%d %H:%M:%S')] 等待 $wait_seconds 秒后执行唤醒..." >> "$LOG_FILE"
+sleep $wait_seconds
+echo "[\$(date '+%Y-%m-%d %H:%M:%S')] 开始执行唤醒..." >> "$LOG_FILE"
+"$CONFIG_DIR/bin/wake" >> "$LOG_FILE" 2>&1
+rm -f "$temp_script"
+EOF
+
+        chmod +x "$temp_script"
+
+        # 后台运行
+        nohup "$temp_script" >/dev/null 2>&1 &
+
+        log_info "[错误码 1308] 已安排自动重试: 将在 $reset_time (${wait_str}后) 执行"
+    fi
+}

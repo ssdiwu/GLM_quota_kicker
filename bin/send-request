@@ -1,0 +1,116 @@
+#!/bin/bash
+# ============================================================================
+# GLM_quota_kicker - 发送请求命令
+# ============================================================================
+# 功能：发送唤醒请求到 API
+# ============================================================================
+
+set -euo pipefail
+
+# 获取脚本目录
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# 加载所有模块
+source "$SCRIPT_DIR/lib/deps.sh"
+source "$SCRIPT_DIR/lib/logger.sh"
+source "$SCRIPT_DIR/lib/config.sh"
+source "$SCRIPT_DIR/lib/utils.sh"
+source "$SCRIPT_DIR/lib/api.sh"
+source "$SCRIPT_DIR/lib/scheduler.sh"
+
+# ============================================================================
+# 显示帮助
+# ============================================================================
+show_help() {
+    cat << EOF
+${GREEN}GLM_quota_kicker - 发送请求${NC}
+
+${BLUE}用法:${NC}
+    $(basename "$0") [选项]
+
+${BLUE}选项:${NC}
+    -h, --help          显示此帮助信息
+    -m, --message MSG   自定义消息（默认随机选择）
+    -v, --verbose       显示详细信息
+    --no-retry          遇到 1308 错误时不创建重试任务
+
+${BLUE}示例:${NC}
+    ./bin/$(basename "$0")           # 发送默认请求
+    ./bin/$(basename "$0") -m "你好"  # 使用自定义消息
+    ./bin/$(basename "$0") -v        # 显示详细信息
+
+EOF
+}
+
+# ============================================================================
+# 主函数
+# ============================================================================
+main() {
+    # 检查依赖
+    dep_check_required || exit 1
+
+    local custom_message=""
+    local verbose=false
+    local no_retry=false
+
+    # 解析参数
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -h|--help)
+                show_help
+                exit 0
+                ;;
+            -m|--message)
+                custom_message="$2"
+                shift 2
+                ;;
+            -v|--verbose)
+                verbose=true
+                shift
+                ;;
+            --no-retry)
+                no_retry=true
+                shift
+                ;;
+            *)
+                echo -e "${RED}未知选项: $1${NC}" >&2
+                show_help
+                exit 1
+                ;;
+        esac
+    done
+
+    # 检查配置文件
+    if ! config_exists; then
+        log_error_exit "配置文件不存在，请先运行: bin/wake -s"
+    fi
+
+    # 加载配置
+    config_load || log_error_exit "配置加载失败"
+    config_validate || log_error_exit "配置验证失败"
+
+    # 设置消息
+    if [[ -n "$custom_message" ]]; then
+        export PROMPT="$custom_message"
+        log_info "使用自定义消息: $PROMPT"
+    else
+        api_set_prompt
+    fi
+
+    if [[ "$verbose" == true ]]; then
+        LOG_LEVEL="debug"
+    fi
+
+    # 发送请求
+    api_send_request
+    local result=$?
+
+    # 如果是 1308 错误且允许重试，创建重试任务
+    if [[ $result -eq 2 && "$no_retry" == false && -n "${API_RESET_TIME:-}" ]]; then
+        scheduler_create_retry_task "$API_RESET_TIME"
+    fi
+
+    exit $result
+}
+
+main "$@"
