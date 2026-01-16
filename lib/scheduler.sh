@@ -27,6 +27,10 @@ scheduler_generate_macos_launchd() {
     local plist_path="$HOME/Library/LaunchAgents/com.GLM_quota_kicker.plist"
     local script_path="$CONFIG_DIR/bin/wake"
 
+    # 解析第一个时间点
+    local first_hour="${times[0]%%:*}"
+    local first_minute="${times[0]##*:}"
+
     # 创建 plist 文件
     cat > "$plist_path" << EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -39,15 +43,30 @@ scheduler_generate_macos_launchd() {
     <array>
         <string>$script_path</string>
     </array>
+EOF
+
+    # 根据时间点数量选择正确的格式
+    if [[ ${#times[@]} -eq 1 ]]; then
+        # 单个时间点：使用字典格式（更兼容）
+        cat >> "$plist_path" << EOF
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>$first_hour</integer>
+        <key>Minute</key>
+        <integer>$first_minute</integer>
+    </dict>
+EOF
+    else
+        # 多个时间点：使用数组格式
+        cat >> "$plist_path" << EOF
     <key>StartCalendarInterval</key>
     <array>
 EOF
-
-    # 添加每个调度时间
-    for time in "${times[@]}"; do
-        local hour="${time%%:*}"
-        local minute="${time##*:}"
-        cat >> "$plist_path" << EOF
+        for time in "${times[@]}"; do
+            local hour="${time%%:*}"
+            local minute="${time##*:}"
+            cat >> "$plist_path" << EOF
     <dict>
         <key>Hour</key>
         <integer>$hour</integer>
@@ -55,11 +74,14 @@ EOF
         <integer>$minute</integer>
     </dict>
 EOF
-    done
+        done
+        cat >> "$plist_path" << EOF
+    </array>
+EOF
+    fi
 
     # 结束 plist 文件
     cat >> "$plist_path" << EOF
-    </array>
     <key>StandardOutPath</key>
     <string>$LOG_FILE</string>
     <key>StandardErrorPath</key>
