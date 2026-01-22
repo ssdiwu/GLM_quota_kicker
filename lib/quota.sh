@@ -254,6 +254,56 @@ quota_format_display() {
 }
 
 # ============================================================================
+# 检查是否已存在自动唤醒任务
+# ============================================================================
+# 返回:
+#   0 任务存在且运行中
+#   1 任务不存在或已结束
+#   2 PID 文件存在但进程不存在（僵尸任务）
+# 设置的全局变量:
+#   AUTO_WAKE_PID - 任务 PID
+#   AUTO_WAIT_SECONDS - 等待秒数
+# ----------------------------------------------------------------------------
+quota_check_existing_task() {
+    local pid_file="$CONFIG_DIR/.auto_wake.pid"
+
+    # 检查 PID 文件是否存在
+    if [[ ! -f "$pid_file" ]]; then
+        return 1
+    fi
+
+    local pid
+    pid=$(cat "$pid_file" 2>/dev/null)
+    if [[ -z "$pid" ]]; then
+        return 1
+    fi
+
+    # 检查进程是否存在
+    if ! kill -0 "$pid" 2>/dev/null; then
+        # 进程不存在，清理僵尸 PID 文件
+        rm -f "$pid_file"
+        # 清理可能存在的临时脚本
+        rm -f "$CONFIG_DIR/.auto_wake_$pid.sh"
+        return 2
+    fi
+
+    # 进程存在，获取详细信息
+    export AUTO_WAKE_PID="$pid"
+
+    # 尝试从脚本中提取等待时间
+    local script_file="$CONFIG_DIR/.auto_wake_${pid}.sh"
+    if [[ -f "$script_file" ]]; then
+        local wait_sec
+        wait_sec=$(grep -o '等待 [0-9]\+ 秒' "$script_file" 2>/dev/null | grep -o '[0-9]\+' | head -1)
+        if [[ -n "$wait_sec" ]]; then
+            export AUTO_WAIT_SECONDS="$wait_sec"
+        fi
+    fi
+
+    return 0
+}
+
+# ============================================================================
 # 自动调度唤醒任务
 # ============================================================================
 # 根据 QUOTA_RESET_TIME 自动设置后台定时任务
@@ -268,6 +318,16 @@ quota_schedule_auto_wake() {
     if [[ -z "$reset_time_ms" ]] || [[ "$reset_time_ms" == "null" ]]; then
         log_warn "没有可用的重置时间，无法自动调度"
         return 1
+    fi
+
+    # 检查是否已存在任务
+    quota_check_existing_task
+    local check_result=$?
+    if [[ $check_result -eq 0 ]]; then
+        log_warn "自动唤醒任务已存在 (PID: ${AUTO_WAKE_PID:-unknown})"
+        return 1
+    elif [[ $check_result -eq 2 ]]; then
+        log_info "发现僵尸任务，已清理"
     fi
 
     # 转换为秒

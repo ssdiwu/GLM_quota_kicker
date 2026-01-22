@@ -284,14 +284,48 @@ main() {
                 echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
                 echo -e "${YELLOW}⏰ 配额将在 ${reset_str} 重置${NC}"
                 echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-                echo -n "是否设置自动唤醒任务？[Y/n]: "
-                read -r confirm
-                if [[ ! "$confirm" =~ ^[Nn]$ ]]; then
-                    if quota_schedule_auto_wake; then
-                        quota_format_schedule_info
-                        echo -e "${GREEN}✓ 自动唤醒任务已设置${NC}"
+
+                # 检查是否已存在任务
+                quota_check_existing_task
+                local check_result=$?
+
+                if [[ $check_result -eq 0 ]]; then
+                    # 任务已存在
+                    local wait_str
+                    if [[ -n "${AUTO_WAIT_SECONDS:-}" ]]; then
+                        wait_str=$(utils_format_seconds "$AUTO_WAIT_SECONDS")
                     else
-                        echo -e "${YELLOW}⚠ 无法创建自动调度任务${NC}" >&2
+                        wait_str="未知时间"
+                    fi
+
+                    echo -e "${GREEN}✓ 自动唤醒任务已运行${NC}"
+                    echo -e "${GRAY}  PID: ${AUTO_WAKE_PID}${NC}"
+                    echo -e "${GRAY}  剩余等待: ${wait_str}${NC}"
+                    echo
+                    echo -n "是否重新设置任务？[y/N]: "
+                    read -r confirm
+                    if [[ "$confirm" =~ ^[Yy]$ ]]; then
+                        # 先停止旧任务
+                        kill "${AUTO_WAKE_PID}" 2>/dev/null || true
+                        rm -f "$CONFIG_DIR/.auto_wake.pid" "$CONFIG_DIR/.auto_wake_${AUTO_WAKE_PID}.sh"
+                        if quota_schedule_auto_wake; then
+                            quota_format_schedule_info
+                            echo -e "${GREEN}✓ 自动唤醒任务已重新设置${NC}"
+                        else
+                            echo -e "${YELLOW}⚠ 无法创建自动调度任务${NC}" >&2
+                        fi
+                    fi
+                else
+                    # 没有任务，询问是否创建
+                    echo -n "是否设置自动唤醒任务？[Y/n]: "
+                    read -r confirm
+                    if [[ ! "$confirm" =~ ^[Nn]$ ]]; then
+                        if quota_schedule_auto_wake; then
+                            quota_format_schedule_info
+                            echo -e "${GREEN}✓ 自动唤醒任务已设置${NC}"
+                        else
+                            echo -e "${YELLOW}⚠ 无法创建自动调度任务${NC}" >&2
+                        fi
                     fi
                 fi
 

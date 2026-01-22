@@ -19,9 +19,11 @@ wake.log
 .retry_wake.sh
 *.tmp.sh
 .timer_wake_*.sh
+.auto_wake_*.sh
 
 # 防睡眠进程 PID 文件
 .caffeinate.pid
+.auto_wake.pid
 
 # hibernatemode 备份文件
 .hibernate*.backup
