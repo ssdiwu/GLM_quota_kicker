@@ -256,50 +256,44 @@ quota_format_display() {
 # ============================================================================
 # 检查是否已存在自动唤醒任务
 # ============================================================================
-# 返回:
-#   0 任务存在且运行中
-#   1 任务不存在或已结束
-#   2 PID 文件存在但进程不存在（僵尸任务）
-# 设置的全局变量:
-#   AUTO_WAKE_PID - 任务 PID
-#   AUTO_WAIT_SECONDS - 等待秒数
+# 输出:
+#   "NONE" - 任务不存在
+#   "ZOMBIE" - 僵尸任务（已清理）
+#   "PID|WAIT_SECONDS" - 任务存在且运行中
+# 返回码: 总是返回 0
 # ----------------------------------------------------------------------------
 quota_check_existing_task() {
     local pid_file="$CONFIG_DIR/.auto_wake.pid"
 
     # 检查 PID 文件是否存在
     if [[ ! -f "$pid_file" ]]; then
-        return 1
+        echo "NONE"
+        return 0
     fi
 
     local pid
-    pid=$(cat "$pid_file" 2>/dev/null)
+    pid=$(cat "$pid_file" 2>/dev/null) || { echo "NONE"; return 0; }
     if [[ -z "$pid" ]]; then
-        return 1
+        echo "NONE"
+        return 0
     fi
 
-    # 检查进程是否存在
+    # 检查进程是否存在，不存在则清理僵尸文件
     if ! kill -0 "$pid" 2>/dev/null; then
-        # 进程不存在，清理僵尸 PID 文件
-        rm -f "$pid_file"
-        # 清理可能存在的临时脚本
-        rm -f "$CONFIG_DIR/.auto_wake_$pid.sh"
-        return 2
+        rm -f "$pid_file" "$CONFIG_DIR/.auto_wake_$pid.sh"
+        echo "ZOMBIE"
+        return 0
     fi
 
-    # 进程存在，获取详细信息
-    export AUTO_WAKE_PID="$pid"
-
-    # 尝试从脚本中提取等待时间
+    # 从脚本中提取等待时间
     local script_file="$CONFIG_DIR/.auto_wake_${pid}.sh"
+    local wait_sec="unknown"
     if [[ -f "$script_file" ]]; then
-        local wait_sec
-        wait_sec=$(grep -o '等待 [0-9]\+ 秒' "$script_file" 2>/dev/null | grep -o '[0-9]\+' | head -1)
-        if [[ -n "$wait_sec" ]]; then
-            export AUTO_WAIT_SECONDS="$wait_sec"
-        fi
+        wait_sec=$(grep -o '等待 [0-9]\+ 秒' "$script_file" 2>/dev/null | grep -o '[0-9]\+' | head -1 || echo "unknown")
     fi
 
+    # 输出结果供调用方捕获
+    echo "$pid|$wait_sec"
     return 0
 }
 
@@ -321,14 +315,17 @@ quota_schedule_auto_wake() {
     fi
 
     # 检查是否已存在任务
-    quota_check_existing_task
-    local check_result=$?
-    if [[ $check_result -eq 0 ]]; then
-        log_warn "自动唤醒任务已存在 (PID: ${AUTO_WAKE_PID:-unknown})"
+    local task_info
+    task_info=$(quota_check_existing_task)
+
+    if [[ "$task_info" =~ ^[0-9]+\| ]]; then
+        local existing_pid="${task_info%%|*}"
+        log_warn "自动唤醒任务已存在 (PID: $existing_pid)"
         return 1
-    elif [[ $check_result -eq 2 ]]; then
+    elif [[ "$task_info" == "ZOMBIE" ]]; then
         log_info "发现僵尸任务，已清理"
     fi
+    # "NONE" 表示没有任务，继续执行
 
     # 转换为秒
     local reset_time_sec=$((reset_time_ms / 1000))
