@@ -277,10 +277,12 @@ main() {
                     fi
                 fi
 
-            # 场景2: 配额快用完（> 95% 且有重置时间）
-            elif [[ "$usage_percent" -gt 95 ]] && [[ -n "$has_reset_time" && "$has_reset_time" != "null" ]]; then
+            # 场景2: 有重置时间（任何使用率，只要有重置时间就提示自动唤醒）
+            elif [[ -n "$has_reset_time" && "$has_reset_time" != "null" ]]; then
+                local reset_str
+                reset_str=$(quota_format_reset_time "$has_reset_time")
                 echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-                echo -e "${YELLOW}⏰ 配额即将重置${NC}"
+                echo -e "${YELLOW}⏰ 配额将在 ${reset_str} 重置${NC}"
                 echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
                 echo -n "是否设置自动唤醒任务？[Y/n]: "
                 read -r confirm
@@ -293,13 +295,13 @@ main() {
                     fi
                 fi
 
-            # 场景3: 配额正常状态
+            # 场景3: 无重置时间且配额正常
             else
                 echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-                echo -e "${GREEN}💡 配额状态正常，无需额外操作${NC}"
+                echo -e "${GREEN}💡 配额状态正常${NC}"
                 echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
                 echo -e "${GRAY}提示:${NC}"
-                echo -e "  ${GRAY}•${NC} 配额快用完时再运行 ${GREEN}./wake.sh -q${NC} 设置自动唤醒"
+                echo -e "  ${GRAY}•${NC} 配额有重置时间后可运行 ${GREEN}./wake.sh -q${NC} 设置自动唤醒"
             fi
 
             exit 0
