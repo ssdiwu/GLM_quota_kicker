@@ -127,10 +127,33 @@ timer_run_background() {
     local temp_script="$CONFIG_DIR/.timer_wake_$$.sh"
     cat > "$temp_script" << EOF
 #!/bin/bash
-echo "[\$(date '+%Y-%m-%d %H:%M:%S')] 等待 $wait_seconds 秒后执行唤醒..." >> "$LOG_FILE"
+# 设置必要的环境变量
+export CONFIG_DIR="$CONFIG_DIR"
+export LOG_FILE="$LOG_FILE"
+
+# 记录日志
+echo "[\$(date '+%Y-%m-%d %H:%M:%S')] 等待 $wait_seconds 秒后执行唤醒..." >> "\$LOG_FILE"
 sleep $wait_seconds
-echo "[\$(date '+%Y-%m-%d %H:%M:%S')] 开始执行唤醒..." >> "$LOG_FILE"
-"$CONFIG_DIR/bin/wake" >> "$LOG_FILE" 2>&1
+echo "[\$(date '+%Y-%m-%d %H:%M:%S')] 开始执行唤醒..." >> "\$LOG_FILE"
+
+# 执行唤醒并获取返回码
+"\$CONFIG_DIR/bin/wake"
+result=\$?
+
+# 如果返回 2（1308 错误），创建重试任务
+if [[ \$result -eq 2 && -n "\${API_RESET_TIME:-}" ]]; then
+    echo "[\$(date '+%Y-%m-%d %H:%M:%S')] 检测到配额重置时间: \${API_RESET_TIME}" >> "\$LOG_FILE"
+    echo "[\$(date '+%Y-%m-%d %H:%M:%S')] 创建重试任务..." >> "\$LOG_FILE"
+
+    # 在当前进程中创建重试任务
+    wait_seconds=\$((60))
+    echo "[\$(date '+%Y-%m-%d %H:%M:%S')] 等待 \$wait_seconds 秒后重试..." >> "\$LOG_FILE"
+    sleep \$wait_seconds
+
+    # 重试唤醒
+    "\$CONFIG_DIR/bin/wake" >> "\$LOG_FILE" 2>&1
+fi
+
 rm -f "$temp_script"
 EOF
 

@@ -15,6 +15,7 @@ source "$SCRIPT_DIR/lib/deps.sh"
 source "$SCRIPT_DIR/lib/logger.sh"
 source "$SCRIPT_DIR/lib/config.sh"
 source "$SCRIPT_DIR/lib/utils.sh"
+source "$SCRIPT_DIR/lib/quota.sh"
 source "$SCRIPT_DIR/lib/api.sh"
 source "$SCRIPT_DIR/lib/scheduler.sh"
 source "$SCRIPT_DIR/lib/timer.sh"
@@ -32,15 +33,14 @@ ${BLUE}用法:${NC}
 
 ${BLUE}选项:${NC}
     -h, --help              显示此帮助信息
-    -t, --test              测试模式（显示详细输出）
+    -q, --quota             智能配额管理（查询+激活/调度）
     -v, --version           显示版本信息
     -a, --awake [CMD]       防睡眠控制（仅 macOS）
                             CMD: start|stop|status|restart
                             可与其他选项组合使用
-    -T, --timer TIME        在指定时间执行（格式：HH:MM:SS、HHMMSS、HH:MM 或 HHMM）
-    -d, --daemon TIME       后台定时模式（格式：HH:MM:SS、HHMMSS、HH:MM 或 HHMM）
-    -s, --setup             重新配置调度
-    -u, --unschedule        取消调度
+    -d, --daemon TIME       后台定时模式（高级用法）
+                            格式: HH:MM:SS、HHMMSS、HH:MM 或 HHMM
+    -s, --setup             重新配置
 
 ${BLUE}子命令:${NC}
     ./bin/check-quota       检查配额状态
@@ -54,14 +54,14 @@ ${BLUE}日志文件:${NC}
     $(log_path)
 
 ${BLUE}示例:${NC}
-    # 测试配置
-    ./wake.sh -t
+    # 智能配额管理（推荐）
+    ./wake.sh -q
 
-    # 在指定时间执行（前台）
-    ./wake.sh -T 15:14
+    # 直接唤醒
+    ./wake.sh
 
-    # 在指定时间执行（后台）
-    ./wake.sh -d 1514
+    # 后台定时执行（高级用法）
+    ./wake.sh -d 15:14
 
     # 启动防睡眠 + 后台定时
     ./wake.sh -a -d 15:14
@@ -70,8 +70,7 @@ ${BLUE}示例:${NC}
     ./wake.sh -s
 
 ${BLUE}提示:${NC}
-    如果已将脚本添加到 PATH，也可以直接使用:
-    wake -t
+    如果已将脚本添加到 PATH，也可以直接使用: wake
 
 更多信息请访问: https://github.com/ssdiwu/GLM_quota_kicker
 EOF
@@ -121,62 +120,9 @@ run_setup_wizard() {
     model="${model:-glm-4.7}"
 
     echo
-
-    # 设置调度时间
-    echo -e "${YELLOW}请设置唤醒时间（最多 4 个，对应配额重置周期）:${NC}"
-    echo "智谱 AI 配额每 5 小时重置：00:00 → 05:00 → 10:00 → 15:00 → 20:00"
-    echo "输入第一个时间后，后续时间将自动按 5 小时递增"
-    echo "支持格式：HH:MM 或 HHMM（如 06:00 或 0600）"
-    echo
-
-    local -a schedule_times=()
-    local first_time="06:00"
-    local prev_time=""
-
-    for i in 1 2 3 4; do
-        local default_time="$first_time"
-        local hint="[默认: $default_time]"
-
-        if [[ $i -gt 1 && -n "$prev_time" ]]; then
-            local calculated_time
-            calculated_time=$(utils_calculate_next_time "$prev_time" 5)
-            if [[ -n "$calculated_time" ]]; then
-                default_time="$calculated_time"
-            fi
-            hint="[默认: $default_time, 基于上一个时间+5小时]"
-        fi
-
-        echo -n "时间 $i $hint: "
-        read -r time_input
-
-        # 去除首尾空格
-        time_input="${time_input// /}"
-
-        # 如果用户直接回车，使用默认值
-        if [[ -z "$time_input" ]]; then
-            time_input="$default_time"
-        fi
-
-        # 规范化时间格式
-        if [[ "$time_input" =~ ^([0-1][0-9]|2[0-3])([0-5][0-9])$ ]]; then
-            time_input="${BASH_REMATCH[1]}:${BASH_REMATCH[2]}"
-        fi
-
-        # 验证时间格式
-        if [[ ! "$time_input" =~ ^([0-1][0-9]|2[0-3]):[0-5][0-9]$ ]]; then
-            echo -e "${RED}时间格式错误，使用默认值: $default_time${NC}"
-            time_input="$default_time"
-        fi
-
-        schedule_times+=("$time_input")
-        prev_time="$time_input"
-    done
-
-    echo
     echo -e "${GREEN}配置摘要:${NC}"
     echo "  服务商: $provider_name"
     echo "  模型: $model"
-    echo "  唤醒时间: ${schedule_times[*]}"
     echo
 
     echo -n "确认并创建配置文件? [Y/n]: "
@@ -187,18 +133,6 @@ run_setup_wizard() {
     fi
 
     # 创建配置文件
-    local schedule_json="["
-    local first=true
-    for t in "${schedule_times[@]}"; do
-        if [[ "$first" == true ]]; then
-            schedule_json+="\"$t\""
-            first=false
-        else
-            schedule_json+=", \"$t\""
-        fi
-    done
-    schedule_json+="]"
-
     cat > "$(config_path)" << EOF
 {
   "api": {
@@ -211,7 +145,6 @@ run_setup_wizard() {
     "endpoint": "$endpoint",
     "authHeader": "$auth_header"
   },
-  "schedule": $schedule_json,
   "request": {
     "prompts": [
       "hi",
@@ -231,53 +164,9 @@ EOF
 
     echo
     log_success "配置文件已创建"
-    echo -e "${CYAN}💡 提示: 你可以编辑 config.jsonc 来自定义唤醒消息列表${NC}"
-
-    # 生成系统调度
-    scheduler_create "${schedule_times[@]}"
-}
-
-# ============================================================================
-# 测试配置
-# ============================================================================
-test_configuration() {
-    echo -e "${CYAN}正在测试配置...${NC}"
-    echo
-
-    # 先加载配置
-    if ! config_load; then
-        echo -e "${RED}✗ 配置加载失败${NC}"
-        return 1
-    fi
-
-    if ! config_validate; then
-        echo -e "${RED}✗ 配置验证失败${NC}"
-        return 1
-    fi
-
-    # 设置消息
-    if [[ "${HAS_CUSTOM_PROMPTS:-false}" == true && ${#PROMPTS_ARRAY[@]} -gt 0 ]]; then
-        PROMPT=$(utils_random_choice PROMPTS_ARRAY)
-        echo -e "${CYAN}使用自定义消息: ${GRAY}$PROMPT${NC}"
-    else
-        PROMPT="${PROMPT:-hi}"
-        echo -e "${CYAN}使用默认消息: ${GRAY}$PROMPT${NC}"
-    fi
-
-    LOG_LEVEL="debug"
-    api_send_request
-    local result=$?
-
-    echo
-    if [[ $result -eq 0 ]]; then
-        echo -e "${GREEN}✓ 测试成功！配置正常工作${NC}"
-    elif [[ $result -eq 2 ]]; then
-        echo -e "${YELLOW}⚠ 配额不足（错误码 1308）${NC}"
-        echo -e "${CYAN}→ 已安排在配额重置后自动重试${NC}"
-    else
-        echo -e "${RED}✗ 测试失败，请检查配置${NC}"
-        return 1
-    fi
+    echo -e "${CYAN}💡 使用提示:${NC}"
+    echo -e "  ${GRAY}•${NC} 运行 ${GREEN}./wake.sh -q${NC} 查询配额使用情况"
+    echo -e "  ${GRAY}•${NC} 运行 ${GREEN}./wake.sh -Q${NC} 查询配额并自动设置唤醒"
 }
 
 # ============================================================================
@@ -287,10 +176,8 @@ main() {
     # 检查依赖
     dep_check_required || exit 1
 
-    local test_mode=false
+    local quota_mode=false
     local setup_mode=false
-    local unschedule_mode=false
-    local timer_time=""
     local daemon_time=""
     local awake_mode=false
     local awake_cmd=""
@@ -306,8 +193,8 @@ main() {
                 show_version
                 exit 0
                 ;;
-            -t|--test)
-                test_mode=true
+            -q|--quota)
+                quota_mode=true
                 shift
                 ;;
             -a|--awake)
@@ -324,14 +211,6 @@ main() {
                 setup_mode=true
                 shift
                 ;;
-            -u|--unschedule)
-                unschedule_mode=true
-                shift
-                ;;
-            -T|--timer)
-                timer_time="$2"
-                shift 2
-                ;;
             -d|--daemon)
                 daemon_time="$2"
                 shift 2
@@ -345,7 +224,7 @@ main() {
     done
 
     # 处理防睡眠命令（纯命令模式）
-    if [[ "$awake_mode" == true && -z "$timer_time" && -z "$daemon_time" && "$setup_mode" == false && "$unschedule_mode" == false && "$test_mode" == false ]]; then
+    if [[ "$awake_mode" == true && -z "$daemon_time" && "$setup_mode" == false && "$quota_mode" == false ]]; then
         case "$awake_cmd" in
             start)
                 awake_start
@@ -363,27 +242,77 @@ main() {
         exit 0
     fi
 
-    # 取消调度
-    if [[ "$unschedule_mode" == true ]]; then
-        scheduler_remove
-        exit 0
+    # 配额智能管理模式
+    if [[ "$quota_mode" == true ]]; then
+        if ! config_exists; then
+            echo -e "${RED}错误: 配置文件不存在${NC}" >&2
+            echo -e "${CYAN}提示: 请先运行 ./wake.sh -s 进行配置${NC}"
+            exit 1
+        fi
+
+        config_load || { echo -e "${RED}配置加载失败${NC}" >&2; exit 1; }
+        config_validate || { echo -e "${RED}配置验证失败${NC}" >&2; exit 1; }
+
+        if quota_query; then
+            quota_format_display
+
+            local usage_percent="${QUOTA_PERCENTAGE:-0}"
+            local has_reset_time="${QUOTA_RESET_TIME:-}"
+
+            # 场景1: 配额未激活（< 5% 且无重置时间）
+            if [[ "$usage_percent" -lt 5 ]] && [[ -z "$has_reset_time" || "$has_reset_time" == "null" ]]; then
+                echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+                echo -e "${YELLOW}💡 检测到配额未激活（使用率: ${usage_percent}%）${NC}"
+                echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+                echo -n "是否立即执行一次激活？[Y/n]: "
+                read -r confirm
+                if [[ ! "$confirm" =~ ^[Nn]$ ]]; then
+                    echo -e "${CYAN}正在激活配额...${NC}"
+                    api_set_prompt
+                    if api_send_request; then
+                        echo -e "${GREEN}✓ 配额激活成功！${NC}"
+                    else
+                        echo -e "${RED}✗ 激活失败${NC}" >&2
+                        exit 1
+                    fi
+                fi
+
+            # 场景2: 配额快用完（> 95% 且有重置时间）
+            elif [[ "$usage_percent" -gt 95 ]] && [[ -n "$has_reset_time" && "$has_reset_time" != "null" ]]; then
+                echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+                echo -e "${YELLOW}⏰ 配额即将重置${NC}"
+                echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+                echo -n "是否设置自动唤醒任务？[Y/n]: "
+                read -r confirm
+                if [[ ! "$confirm" =~ ^[Nn]$ ]]; then
+                    if quota_schedule_auto_wake; then
+                        quota_format_schedule_info
+                        echo -e "${GREEN}✓ 自动唤醒任务已设置${NC}"
+                    else
+                        echo -e "${YELLOW}⚠ 无法创建自动调度任务${NC}" >&2
+                    fi
+                fi
+
+            # 场景3: 配额正常状态
+            else
+                echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+                echo -e "${GREEN}💡 配额状态正常，无需额外操作${NC}"
+                echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+                echo -e "${GRAY}提示:${NC}"
+                echo -e "  ${GRAY}•${NC} 配额快用完时再运行 ${GREEN}./wake.sh -q${NC} 设置自动唤醒"
+            fi
+
+            exit 0
+        else
+            echo -e "${RED}配额查询失败${NC}" >&2
+            echo -e "${CYAN}提示: 请检查网络连接和 API Key${NC}"
+            exit 1
+        fi
     fi
 
     # 配置向导
     if [[ "$setup_mode" == true ]]; then
-        scheduler_remove
         run_setup_wizard
-        test_configuration
-        exit 0
-    fi
-
-    # 定时器模式
-    if [[ -n "$timer_time" ]]; then
-        if [[ "$awake_mode" == true ]]; then
-            awake_start
-            echo
-        fi
-        timer_run_foreground "$timer_time"
         exit 0
     fi
 
@@ -394,14 +323,6 @@ main() {
             echo
         fi
         timer_run_background "$daemon_time"
-        exit 0
-    fi
-
-    # 测试模式
-    if [[ "$test_mode" == true ]]; then
-        LOG_LEVEL="debug"
-        echo -e "${BLUE}测试模式已启用${NC}\n"
-        test_configuration
         exit 0
     fi
 
@@ -421,7 +342,16 @@ main() {
 
     # 如果是 1308 错误，创建重试任务
     if [[ $result -eq 2 && -n "${API_RESET_TIME:-}" ]]; then
+        log_info "检测到 1308 错误，准备创建重试任务，重置时间: $API_RESET_TIME"
         scheduler_create_retry_task "$API_RESET_TIME"
+        local retry_result=$?
+        if [[ $retry_result -eq 0 ]]; then
+            log_info "重试任务创建成功"
+        else
+            log_error "重试任务创建失败，错误码: $retry_result"
+        fi
+    elif [[ $result -eq 2 ]]; then
+        log_warn "收到 1308 错误，但 API_RESET_TIME 变量为空"
     fi
 
     exit $result

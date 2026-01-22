@@ -14,7 +14,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$SCRIPT_DIR/lib/deps.sh"
 source "$SCRIPT_DIR/lib/logger.sh"
 source "$SCRIPT_DIR/lib/config.sh"
-source "$SCRIPT_DIR/lib/api.sh"
+source "$SCRIPT_DIR/lib/quota.sh"
 
 # ============================================================================
 # 显示帮助
@@ -82,14 +82,17 @@ main() {
     echo -e "${CYAN}正在检查配额状态...${NC}"
     echo
 
-    if api_check_quota; then
-        echo -e "${GREEN}✓ 配额可用${NC}"
-        echo -e "${CYAN}服务商: ${PROVIDER_NAME:-未知}${NC}"
-        echo -e "${CYAN}模型: $MODEL${NC}"
-        exit 0
+    if quota_query; then
+        quota_format_display
+        local usage_percent="${QUOTA_PERCENTAGE:-0}"
+        if [[ "$usage_percent" -lt 100 ]]; then
+            exit 0
+        else
+            exit 1
+        fi
     else
-        echo -e "${YELLOW}⚠ 配额不足或无法连接${NC}"
-        echo -e "${GRAY}请检查网络连接或等待配额重置${NC}"
+        echo -e "${YELLOW}⚠ 配额查询失败${NC}"
+        echo -e "${GRAY}请检查网络连接或 API Key${NC}"
         exit 1
     fi
 }

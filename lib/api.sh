@@ -13,6 +13,7 @@ _LIB_API_LOADED=true
 source "$(dirname "${BASH_SOURCE[0]}")/config.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/logger.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/utils.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/quota.sh"
 
 # ============================================================================
 # API 配置
@@ -91,6 +92,37 @@ api_parse_1308_error() {
 api_send_request() {
     # 确保已设置消息
     api_set_prompt
+
+    # 智能配额检查：先查询配额再决定是否发送请求
+    log_debug "执行智能配额检查..."
+    if quota_query 2>/dev/null; then
+        local usage_percent="${QUOTA_PERCENTAGE:-0}"
+        log_debug "当前配额使用率: ${usage_percent}%"
+
+        # 如果配额已用完，直接返回 1308 错误码
+        if [[ "$usage_percent" -ge 100 ]]; then
+            log_info "配额已用完 (100%)，跳过发送请求"
+            echo -e "${YELLOW}⚠ 配额已用完${NC}"
+
+            # 尝试获取重置时间
+            if [[ -n "${QUOTA_RESET_TIME:-}" ]] && [[ "$QUOTA_RESET_TIME" != "null" ]]; then
+                local reset_str
+                reset_str=$(quota_format_reset_time "$QUOTA_RESET_TIME")
+                echo -e "${YELLOW}配额将在 ${reset_str} 重置${NC}"
+                export API_RESET_TIME="$(date -r $((QUOTA_RESET_TIME / 1000)) '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo '')"
+            fi
+
+            return 2
+        fi
+
+        # 如果配额使用率过高，给出警告
+        if [[ "$usage_percent" -ge 95 ]]; then
+            echo -e "${YELLOW}⚠ 配额即将耗尽 (${usage_percent}%)${NC}"
+            log_warn "配额即将耗尽 (${usage_percent}%)"
+        fi
+    else
+        log_debug "配额查询失败，将继续发送请求"
+    fi
 
     local url="$BASE_URL$ENDPOINT"
     local attempt=0
@@ -177,48 +209,6 @@ api_send_request() {
 
     if [[ -n "$error_code" ]]; then
         echo -e "${GRAY}错误码: $error_code${NC}" >&2
-    fi
-
-    return 1
-}
-
-# ============================================================================
-# 快速检查配额（不发送完整请求）
-# ============================================================================
-# 返回:
-#   0 配额可用
-#   1 配额不足或其他错误
-# ----------------------------------------------------------------------------
-api_check_quota() {
-    local url="$BASE_URL$ENDPOINT"
-
-    # 构建请求
-    local auth_header
-    auth_header="$(api_build_auth_header)"
-    local headers=(-H "$auth_header" -H "Content-Type: $CONTENT_TYPE")
-
-    # 发送最小请求
-    local response
-    response=$(curl -s -w "\n%{http_code}" \
-        --max-time 10 \
-        "${headers[@]}" \
-        -d '{"model":"'"$MODEL"'","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}' \
-        "$url" 2>&1) || true
-
-    local http_code=$(echo "$response" | tail -n1)
-    local body=$(echo "$response" | sed '$d')
-
-    # 检查是否成功
-    if [[ "$http_code" =~ ^2 ]]; then
-        return 0
-    fi
-
-    # 检查是否是 1308 错误
-    local error_code
-    error_code=$(echo "$body" | jq -r '.error.code // empty' 2>/dev/null)
-
-    if [[ "$error_code" == "1308" ]]; then
-        return 1
     fi
 
     return 1
